@@ -1,0 +1,298 @@
+---
+title: "R Notebook"
+output:
+  pdf_document: default
+  html_notebook: default
+---
+
+
+
+```{r}
+set.seed(1680) # for reproducibility
+
+library(dplyr) # for data cleaning
+library(ISLR) # for college dataset
+library(cluster) # for gower similarity and pam
+library(Rtsne) # for t-SNE plot
+library(ggplot2) # for visualization
+library(reshape2)
+library(tidyr)
+library(purrr)
+library(fmsb)
+```
+
+```{r}
+df = read.csv("C:/Users/Hank/Desktop/survey_cost/survey_cost_0308.csv")
+
+```
+
+```{r}
+# convert avg_bid to numeric
+df$avg_bid <- as.numeric(as.character(df$avg_bid))
+summary(df$avg_bid)
+```
+
+```{r}
+# there are some points whose reponse rate are greater than 20 (filter out?)
+ggplot(df, aes(x=survey_response,y=cost_response))+geom_point()
+```
+
+
+```{r}
+# remove the outliers 
+df_sv_1 <- df %>% 
+            filter(cost_response<= 20, cost > 0) 
+# fill the NA data in avg_bid with median value 
+df_sv_1$avg_bid <- df_sv_1$avg_bid %>% replace_na(median(df_sv_1$avg_bid, na.rm = TRUE))
+        
+```
+
+
+```{r}
+# check the scatter plot after droping outliers
+ggplot(df_sv_1, aes(x=survey_response,y=cost_response))+geom_point()
+```
+
+```{r}
+# correlation matrix
+corr <- df_sv_1 %>% 
+        select(cost,impressions,survey_response,response_rate,cost_response,exposure_time,avg_bid)
+cormat <- round(cor(corr),2)
+melted_cormat <- melt(cormat)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) +
+  geom_tile()
+```
+
+```{r}
+# correlation matrix with value
+# cost has a strong uphill correlation with impression and survey_response (0.98 and 0.85 respectively)
+# cost_response is negative correlated (-0.47) with response_rate
+library(corrplot)
+corr <- df_sv_1 %>% 
+        select(cost,impressions,survey_response,response_rate,exposure_time,avg_bid)
+
+attach(corr)
+
+qb = cor(corr)
+corrplot.mixed(qb)
+```
+```{r}
+# For further diagnosis of the problem, let us first look at the pair-wise correlation among the # explanatory variables.
+library(GGally)
+X <- corr %>% 
+    select(cost,survey_response,response_rate,exposure_time,avg_bid)
+ggpairs(X)
+```
+
+
+```{r}
+# check the distribution of our target, we can see it's biased 
+# Some transformation is needed to cost 
+ggplot(df_sv_1, aes(x= cost))+geom_density()
+
+```
+
+```{r}
+# the log transformation is used for target variable 
+df_model <- df_sv_1 %>% 
+  select(cost,survey_response,response_rate,cost_response,exposure_time,avg_bid)
+```
+
+```{r}
+# check how other variables are distributed 
+df_model %>% 
+  gather() %>%          # convert to key-value pairs 
+  ggplot(aes(value)) +
+  facet_wrap(~key, scales = "free") +
+  geom_density()
+```
+
+
+```{r}
+# split into training and test sets
+# 80% of the sample size
+
+smp_size <- floor(0.8*nrow(df_model))
+
+# set the seed to make your partition reproductible 
+
+# set.seed(234)
+
+# train_ind <- sample(seq_len(nrow(df_model)),size = smp_size)
+
+# train <- df_model[train_ind,]
+
+# test <- df_model[-train_ind,]
+
+```
+
+```{r}
+train <- df
+test <- read.csv("20486839_test.csv")
+```
+
+```{r}
+# Evaluate Collinearity
+fit =lm(formula = log(cost)~cost_response+survey_response+response_rate+exposure_time+avg_bid, data=train)
+
+# Collinearity Diagnostics
+VIF(fit) # variance inflation factors 
+sqrt(VIF(fit)) > 2 # problem?
+
+# it seems that there is no multicollinearity in our set
+```
+
+```{r}
+# Simple linear model with interaction effect 
+interaction_model= lm(formula = log(cost)~cost_response+survey_response+response_rate+exposure_time+avg_bid, data=train)
+summary(interaction_model)
+```
+
+```{r}
+# Residual 
+lm_res <- rstandard(interaction_model)
+# QQPlot (visual check) to see whether residuals are normally distributed
+qqnorm(lm_res)
+qqline(lm_res)
+# Shapiro-Wilk test 
+shapiro.test(lm_res)
+```
+```{r}
+linear_regression= lm(formula = log(cost)~survey_response+response_rate+exposure_time+avg_bid, data=df)
+summary(linear_regression)
+
+# Residual 
+lm_res <- rstandard(linear_regression)
+# QQPlot (visual check) to see whether residuals are normally distributed
+qqnorm(lm_res)
+qqline(lm_res)
+# Shapiro-Wilk test 
+shapiro.test(lm_res)
+```
+
+
+```{r}
+# Evaluate the model performance based on RMSE and MAE
+library(forecast)
+pred_lm <- predict(linear_regression,test,type = "response")
+residuals <- test$cost - pred_lm
+lm_acc <- accuracy(pred_lm,test$cost)
+lm_acc <- lm_acc[,c(2,3)]
+```
+
+```{r}
+# Prediction interval
+pred_lm <- predict(fit,test,interval = "predict")
+```
+
+```{r}
+# Use different way to calculate RMSE
+rmse = sqrt(mean((residuals)^2))
+rmse
+```
+
+```{r}
+# Decision Tree - Regression Tree
+library(rpart)
+library(rpart.plot)
+
+class.tree <- rpart(cost~survey_response+response_rate+exposure_time+avg_bid,data = train, control = rpart.control(cp = 0.01))
+
+plotcp(class.tree)
+printcp(class.tree)
+```
+```{r}
+# Graphical representation 
+rpart.plot(class.tree,box.palette = "GnBu",
+           branch.lty=3, shadow.col = "gray", nn=TRUE)
+```
+```{r}
+# get the optimal CP programmatically and if possible to prune the tree
+# It seems that there is no need to prune the tree
+min.xerror <- class.tree$cptable[which.min(class.tree$cptable[,"xerror"]),"CP"]
+min.xerror
+```
+
+```{r}
+# Calculate the RMSE and MAE
+library(forecast)
+pred_tree <- predict(class.tree,test)
+RMSE.rtree <- sqrt(mean((test$cost-pred_tree)^2))
+RMSE.rtree 
+MAE.rtree <- mean(abs(test$cost-pred_tree))
+MAE.rtree
+
+tree_error = data.frame(RMSE.rtree,MAE.rtree)
+colnames(tree_error) <- c("RMSE","MAE")
+```
+
+```{r}
+# Random Forest 
+library(randomForest)
+RF <- randomForest(cost~survey_response+response_rate+ exposure_time+avg_bid,data = train, importance = TRUE,
+                   ntree = 500, nodesize=7, na.action = na.roughfix)
+```
+
+```{r}
+# Feature Significant Level
+options(repr.plot.width=9, repr.plot.height=6)
+varImpPlot(RF, type=1)
+```
+
+```{r}
+# Prediction 
+rf_pred <- predict(RF,test)
+rf_acc <- accuracy(rf_pred, test$cost) 
+rf_acc <- rf_acc[,c(2,3)]
+```
+```{r}
+# Compute Prediction interval and confidence interval for Regression Forest
+pred_rf <- predict(RF,test,predict.all = TRUE)
+#pred_rf.int <- t(apply(pred_rf$individual, 1, function(x){ 
+#  c(mean(x),mean(x) + c(-1.96,1.96)*sd(x), quantile(x, c(0.025,0.975)) )}))
+```
+
+```{r}
+# Compute Prediction Interval
+#test <- exp(pred_rf.int)
+#colnames(test) <- c("Mean","Lwr","Upr","2.5%","9.75%")
+```
+
+```{r}
+mean.rf <- pred_rf$aggregate
+sd.rf <- mean(sqrt(RF$mse))
+pred.rf.int3 <- cbind(mean.rf,mean.rf - 1.96*sd.rf,mean.rf+1.96*sd.rf)
+test2 <- exp(pred.rf.int3)
+colnames(test2) <- c("Mean","Lwr","Upr")
+```
+
+```{r}
+# Creating Comparison Table
+final <- rbind(lm_acc,tree_error,rf_acc)
+row.names(final) <- c("linear regression","regression tree", "random forest")
+head(final)
+round(final,2)
+```
+
+
+
+```{r}
+df_2048 <- read.csv("C:/Users/Hank/Desktop/survey_cost/20486839.csv")
+```
+
+```{r}
+# Predition on campiagn 20486839 using random forest 
+df_2048_test <- df_2048 %>% 
+  select(survey_response,response_rate,cost_response,elapsed_time,avg_bid)
+```
+```{r}
+pred_rf_2018 <- predict(RF,df_2048_test,predict.all = TRUE)
+mean.rf <- pred_rf_2018$aggregate
+sd.rf <- mean(sqrt(RF$mse))
+pred.rf.int3 <- cbind(mean.rf,mean.rf - 1.96*sd.rf,mean.rf+1.96*sd.rf)
+test2 <- exp(pred.rf.int3)
+colnames(test2) <- c("Mean","Lwr","Upr")
+
+write.csv(test2,"C:/Users/Hank/Desktop/survey_cost/20486839_results.csv")
+```
+
